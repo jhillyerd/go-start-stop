@@ -3,10 +3,16 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
+
+var clean = flag.Bool("clean", false, "services won't fail, requiring signal to exit.")
 
 // Service represents a long running service in our application.
 type Service struct {
@@ -45,8 +51,12 @@ func (s *Service) run() error {
 	log.Printf("service %s started", s.name)
 	// s.ctx should be used as a parent for request contexts, and sync.WaitGroup leveraged to
 	// prevent this function from returning until all workers are finished.
+	failc := time.After(time.Hour * 1000)
+	if !*clean {
+		failc = time.After(s.timeout)
+	}
 	select {
-	case <-time.After(s.timeout):
+	case <-failc:
 		// Pretend there was an error requiring this service to stop.
 		return fmt.Errorf("service %s timed out after %v", s.name, s.timeout)
 	case <-s.ctx.Done():
@@ -58,6 +68,8 @@ func (s *Service) run() error {
 
 // main starts our services, restarts them after failures.
 func main() {
+	flag.Parse()
+
 	// Create services, ignoring configuration errors.
 	a := New("a", time.Second*3)
 	b := New("b", time.Second*2)
@@ -66,8 +78,12 @@ func main() {
 	ac := a.Start()
 	bc := b.Start()
 	cc := c.Start()
-	// Wait for any service to fail, restart them a couple times.
+	// Setup signal handler
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGTERM, syscall.SIGINT)
+retryLoop:
 	for retries := 2; retries >= 0; retries-- {
+		// Wait for any service to fail, restart them a couple times.
 		select {
 		case err := <-ac:
 			log.Printf("error: %v", err)
@@ -84,10 +100,13 @@ func main() {
 			if retries > 0 {
 				cc = c.Start()
 			}
+		case sig := <-sigc:
+			log.Printf("got signal %v", sig)
+			break retryLoop
 		}
-		log.Printf("%v retries remaining", retries)
+		log.Printf("(%v retries remaining)", retries)
 	}
-	log.Printf("too many failures, shutting down")
+	log.Printf("shutting down")
 	// Stop all services.
 	a.Stop()
 	b.Stop()
